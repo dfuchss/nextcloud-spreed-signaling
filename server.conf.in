@@ -1,28 +1,13 @@
 [http]
 # IP and port to listen on for HTTP requests.
 # Comment line to disable the listener.
-#listen = 127.0.0.1:8080
+listen = 0.0.0.0:8080
 
 # HTTP socket read timeout in seconds.
 #readtimeout = 15
 
 # HTTP socket write timeout in seconds.
 #writetimeout = 15
-
-[https]
-# IP and port to listen on for HTTPS requests.
-# Comment line to disable the listener.
-#listen = 127.0.0.1:8443
-
-# HTTPS socket read timeout in seconds.
-#readtimeout = 15
-
-# HTTPS socket write timeout in seconds.
-#writetimeout = 15
-
-# Certificate / private key to use for the HTTPS server.
-certificate = /etc/nginx/ssl/server.crt
-key = /etc/nginx/ssl/server.key
 
 [app]
 # Set to "true" to install pprof debug handlers.
@@ -73,7 +58,7 @@ connectionsperhost = 8
 # multiple backends. For local development, this can be set to ":loopback:"
 # to process NATS messages internally instead of sending them through an
 # external NATS backend.
-#url = nats://localhost:4222
+url = nats://localhost:4222
 
 [mcu]
 # The type of the MCU to use. Currently only "janus" is supported.
