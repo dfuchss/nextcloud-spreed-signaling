@@ -4,7 +4,7 @@
 
 # Checl for config. Iff none exist copy sample and stop container.
 if [ ! -f /config/server.conf ]; then
-	echo "Please config server!"
+	echo "Please config server! Therfore, create a server.conf in the config folder. A sample is supplied."
 	cp /src/nextcloud-hpb/server.conf.in /config/server.conf.in
 	exit 1
 fi
