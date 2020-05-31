@@ -8,7 +8,7 @@ docker build -t signaling .
 # Create config .. 
 docker run -it --rm-v LOCAL_PATH_HERE:/config signaling
 # Edit config and run Docker ..
-docker run -itd -p 8080:8080 -v LOCAL_PATH_HER:/config --name nextcloud-backend --restart always --log-opt max-size=10m --log-opt max-file=5 signaling
+docker run -itd -p 8080:8080 -v LOCAL_PATH_HERE:/config --name nextcloud-backend --restart always --log-opt max-size=10m --log-opt max-file=5 signaling
 ```
 
 # Original ...
