@@ -1,3 +1,7 @@
+# Spreed standalone signaling server (Forked)
+I've added a simple standalone Docker configuration. I've added a simple docker file with configured NATS server. I've also deleted section for https from sample config (as reverse proxy shall be used for this docker file) and enabled listening to http (any ip) by default.
+
+# Original ...
 # Spreed standalone signaling server
 
 [![Build Status](https://travis-ci.org/strukturag/nextcloud-spreed-signaling.svg?branch=master)](https://travis-ci.org/strukturag/nextcloud-spreed-signaling)
