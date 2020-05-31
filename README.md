@@ -1,6 +1,16 @@
 # Spreed standalone signaling server (Forked)
 I've added a simple standalone Docker configuration. I've added a simple docker file with configured NATS server. I've also deleted section for https from sample config (as reverse proxy shall be used for this docker file) and enabled listening to http (any ip) by default.
 
+## Usage:
+```
+# Build image ..
+docker build -t signaling .
+# Create config .. 
+docker run -it --rm-v LOCAL_PATH_HERE:/config signaling
+# Edit config and run Docker ..
+docker run -itd -p 8080:8080 -v LOCAL_PATH_HER:/config --name nextcloud-backend --restart always --log-opt max-size=10m --log-opt max-file=5 signaling
+```
+
 # Original ...
 # Spreed standalone signaling server
 
