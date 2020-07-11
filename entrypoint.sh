@@ -13,7 +13,7 @@ fi
 if pgrep nats-server; then pkill nats-server; fi
 nats-server&
 
-if pgrep signaling; then pkill signalingr; fi
+if pgrep signaling; then pkill signaling; fi
 
 # Start the signaling server
 /src/nextcloud-hpb/bin/signaling -config /config/server.conf
