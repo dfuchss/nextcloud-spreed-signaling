@@ -11,10 +11,10 @@ docker run -it --rm -v LOCAL_PATH_HERE:/config signaling
 docker run -itd -p 8080:8080 -v LOCAL_PATH_HERE:/config --name nextcloud-backend --restart always --log-opt max-size=10m --log-opt max-file=5 signaling
 ```
 
-# Original ...
+# Original
 # Spreed standalone signaling server
 
-[![Build Status](https://travis-ci.org/strukturag/nextcloud-spreed-signaling.svg?branch=master)](https://travis-ci.org/strukturag/nextcloud-spreed-signaling)
+![Build Status](https://github.com/strukturag/nextcloud-spreed-signaling/workflows/test/badge.svg)
 
 This repository contains the standalone signaling server which can be used for
 Nextcloud Talk (https://apps.nextcloud.com/apps/spreed).
@@ -25,8 +25,15 @@ information on the API of the signaling server.
 
 ## Building
 
-You will need at least go 1.6 to build the signaling server. All other
-dependencies are fetched automatically while building.
+The following tools are required for building the signaling server.
+
+- curl
+- git
+- go >= 1.6
+- make
+- python3
+
+All other dependencies are fetched automatically while building.
 
     $ make build
 
@@ -88,6 +95,21 @@ Enable and start service:
 ```bash
 systemctl enable signaling.service
 systemctl start signaling.service
+```
+
+### Running with Docker
+
+#### Docker Compose
+
+You will likely have to adjust the Janus command line options depending on the exact network configuration on your server. Refer to [Setup of Janus](#setup-of-janus) and the Janus documentation for how to configure your Janus server.
+
+Copy `server.conf.in` to `server.conf` and adjust it to your liking. 
+
+If you're using the [docker-compose.yml](docker-compose.yml) configuration as is, the MCU Url must be set to `ws://localhost:8188`, the NATS Url must be set to `nats://localhost:4222`, and TURN Servers must be set to `turn:localhost:3478?transport=udp,turn:localhost:3478?transport=tcp`.
+
+```bash
+docker-compose build
+docker-compose up -d
 ```
 
 ## Setup of NATS server

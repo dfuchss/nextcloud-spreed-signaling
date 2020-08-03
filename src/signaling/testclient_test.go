@@ -233,7 +233,8 @@ func NewTestClient(t *testing.T, server *httptest.Server, hub *Hub) *TestClient 
 				readErrorChan <- err
 				return
 			} else if messageType != websocket.TextMessage {
-				t.Fatalf("Expect text message, got %d", messageType)
+				t.Errorf("Expect text message, got %d", messageType)
+				return
 			}
 
 			messageChan <- data
@@ -376,10 +377,12 @@ func (c *TestClient) SendHelloInternal() error {
 	mac := hmac.New(sha256.New, testInternalSecret)
 	mac.Write([]byte(random))
 	token := hex.EncodeToString(mac.Sum(nil))
+	backend := c.server.URL
 
 	params := ClientTypeInternalAuthParams{
-		Random: random,
-		Token:  token,
+		Random:  random,
+		Token:   token,
+		Backend: backend,
 	}
 	return c.SendHelloParams("", "internal", params)
 }
@@ -598,7 +601,7 @@ func (c *TestClient) RunUntilRoomlistUpdate(ctx context.Context) (*RoomEventServ
 	}
 }
 
-func checkMessageRoomlistDisinvite(message *ServerMessage) (*RoomEventServerMessage, error) {
+func checkMessageRoomlistDisinvite(message *ServerMessage) (*RoomDisinviteEventServerMessage, error) {
 	if err := checkMessageType(message, "event"); err != nil {
 		return nil, err
 	} else if message.Event.Target != "roomlist" {
@@ -610,7 +613,7 @@ func checkMessageRoomlistDisinvite(message *ServerMessage) (*RoomEventServerMess
 	return message.Event.Disinvite, nil
 }
 
-func (c *TestClient) RunUntilRoomlistDisinvite(ctx context.Context) (*RoomEventServerMessage, error) {
+func (c *TestClient) RunUntilRoomlistDisinvite(ctx context.Context) (*RoomDisinviteEventServerMessage, error) {
 	if message, err := c.RunUntilMessage(ctx); err != nil {
 		return nil, err
 	} else {

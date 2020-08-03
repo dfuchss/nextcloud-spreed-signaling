@@ -123,6 +123,7 @@ func performBackendRequest(url string, body []byte) (*http.Response, error) {
 	check := CalculateBackendChecksum(rnd, body, testBackendSecret)
 	request.Header.Set("Spreed-Signaling-Random", rnd)
 	request.Header.Set("Spreed-Signaling-Checksum", check)
+	request.Header.Set("Spreed-Signaling-Backend", url)
 	client := &http.Client{}
 	return client.Do(request)
 }
@@ -212,6 +213,56 @@ func TestBackendServer_InvalidAuth(t *testing.T) {
 	}
 }
 
+func TestBackendServer_OldCompatAuth(t *testing.T) {
+	_, _, _, _, _, server, shutdown := CreateBackendServerForTest(t)
+	defer shutdown()
+
+	roomId := "the-room-id"
+	userid := "the-user-id"
+	roomProperties := json.RawMessage("{\"foo\":\"bar\"}")
+	msg := &BackendServerRoomRequest{
+		Type: "invite",
+		Invite: &BackendRoomInviteRequest{
+			UserIds: []string{
+				userid,
+			},
+			AllUserIds: []string{
+				userid,
+			},
+			Properties: &roomProperties,
+		},
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request, err := http.NewRequest("POST", server.URL+"/api/v1/room/"+roomId, bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	rnd := newRandomString(32)
+	check := CalculateBackendChecksum(rnd, data, testBackendSecret)
+	request.Header.Set("Spreed-Signaling-Random", rnd)
+	request.Header.Set("Spreed-Signaling-Checksum", check)
+	client := &http.Client{}
+	res, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer res.Body.Close()
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		t.Error(err)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("Expected success, got %s: %s", res.Status, string(body))
+	}
+}
+
 func TestBackendServer_InvalidBody(t *testing.T) {
 	_, _, _, _, _, server, shutdown := CreateBackendServerForTest(t)
 	defer shutdown()
@@ -260,14 +311,20 @@ func TestBackendServer_UnsupportedRequest(t *testing.T) {
 }
 
 func TestBackendServer_RoomInvite(t *testing.T) {
-	_, _, n, _, _, server, shutdown := CreateBackendServerForTest(t)
+	_, _, n, hub, _, server, shutdown := CreateBackendServerForTest(t)
 	defer shutdown()
+
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	userid := "test-userid"
 	roomProperties := json.RawMessage("{\"foo\":\"bar\"}")
+	backend := hub.backend.GetBackend(u)
 
 	natsChan := make(chan *nats.Msg, 1)
-	subject := GetSubjectForUserId(userid)
+	subject := GetSubjectForUserId(userid, backend)
 	sub, err := n.Subscribe(subject, natsChan)
 	if err != nil {
 		t.Fatal(err)
@@ -321,6 +378,13 @@ func TestBackendServer_RoomDisinvite(t *testing.T) {
 	_, _, n, hub, _, server, shutdown := CreateBackendServerForTest(t)
 	defer shutdown()
 
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backend := hub.backend.GetBackend(u)
+
 	client := NewTestClient(t, server, hub)
 	defer client.CloseWithBye()
 	if err := client.SendHello(testDefaultUserId); err != nil {
@@ -355,7 +419,7 @@ func TestBackendServer_RoomDisinvite(t *testing.T) {
 	roomProperties := json.RawMessage("{\"foo\":\"bar\"}")
 
 	natsChan := make(chan *nats.Msg, 1)
-	subject := GetSubjectForUserId(testDefaultUserId)
+	subject := GetSubjectForUserId(testDefaultUserId, backend)
 	sub, err := n.Subscribe(subject, natsChan)
 	if err != nil {
 		t.Fatal(err)
@@ -402,6 +466,8 @@ func TestBackendServer_RoomDisinvite(t *testing.T) {
 		t.Errorf("Expected room %s, got %+v", roomId, event)
 	} else if event.Disinvite.Properties != nil {
 		t.Errorf("Room properties should be omitted, got %s", string(*event.Disinvite.Properties))
+	} else if event.Disinvite.Reason != "disinvited" {
+		t.Errorf("Reason should be disinvited, got %s", event.Disinvite.Reason)
 	}
 
 	if message, err := client.RunUntilRoomlistDisinvite(ctx); err != nil {
@@ -554,9 +620,18 @@ func TestBackendServer_RoomUpdate(t *testing.T) {
 	_, _, n, hub, _, server, shutdown := CreateBackendServerForTest(t)
 	defer shutdown()
 
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	roomId := "the-room-id"
 	emptyProperties := json.RawMessage("{}")
-	room, err := hub.createRoom(roomId, &emptyProperties)
+	backend := hub.backend.GetBackend(u)
+	if backend == nil {
+		t.Fatalf("Did not find backend")
+	}
+	room, err := hub.createRoom(roomId, &emptyProperties, backend)
 	if err != nil {
 		t.Fatalf("Could not create room: %s", err)
 	}
@@ -566,7 +641,7 @@ func TestBackendServer_RoomUpdate(t *testing.T) {
 	roomProperties := json.RawMessage("{\"foo\":\"bar\"}")
 
 	natsChan := make(chan *nats.Msg, 1)
-	subject := GetSubjectForUserId(userid)
+	subject := GetSubjectForUserId(userid, backend)
 	sub, err := n.Subscribe(subject, natsChan)
 	if err != nil {
 		t.Fatal(err)
@@ -627,16 +702,25 @@ func TestBackendServer_RoomDelete(t *testing.T) {
 	_, _, n, hub, _, server, shutdown := CreateBackendServerForTest(t)
 	defer shutdown()
 
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	roomId := "the-room-id"
 	emptyProperties := json.RawMessage("{}")
-	if _, err := hub.createRoom(roomId, &emptyProperties); err != nil {
+	backend := hub.backend.GetBackend(u)
+	if backend == nil {
+		t.Fatalf("Did not find backend")
+	}
+	if _, err := hub.createRoom(roomId, &emptyProperties, backend); err != nil {
 		t.Fatalf("Could not create room: %s", err)
 	}
 
 	userid := "test-userid"
 
 	natsChan := make(chan *nats.Msg, 1)
-	subject := GetSubjectForUserId(userid)
+	subject := GetSubjectForUserId(userid, backend)
 	sub, err := n.Subscribe(subject, natsChan)
 	if err != nil {
 		t.Fatal(err)
@@ -679,6 +763,8 @@ func TestBackendServer_RoomDelete(t *testing.T) {
 		t.Errorf("Expected room %s, got %+v", roomId, event)
 	} else if event.Disinvite.Properties != nil {
 		t.Errorf("Room properties should be omitted, got %s", string(*event.Disinvite.Properties))
+	} else if event.Disinvite.Reason != "deleted" {
+		t.Errorf("Reason should be deleted, got %s", event.Disinvite.Reason)
 	}
 
 	// TODO: Use event to wait for NATS messages.
@@ -932,6 +1018,10 @@ func TestBackendServer_ParticipantsUpdateTimeout(t *testing.T) {
 	} else if room.Room.RoomId != roomId {
 		t.Fatalf("Expected room %s, got %s", roomId, room.Room.RoomId)
 	}
+
+	// Give message processing some time.
+	time.Sleep(10 * time.Millisecond)
+
 	if room, err := client2.JoinRoom(ctx, roomId); err != nil {
 		t.Fatal(err)
 	} else if room.Room.RoomId != roomId {
@@ -942,53 +1032,7 @@ func TestBackendServer_ParticipantsUpdateTimeout(t *testing.T) {
 		defer hubRoom.Close()
 	}
 
-	// We will receive "joined" events for all clients. The ordering is not
-	// defined as messages are processed and sent by asynchronous NATS handlers.
-	msg1_1, err := client1.RunUntilMessage(ctx)
-	if err != nil {
-		t.Error(err)
-	}
-	msg1_2, err := client1.RunUntilMessage(ctx)
-	if err != nil {
-		t.Error(err)
-	}
-	msg2_1, err := client2.RunUntilMessage(ctx)
-	if err != nil {
-		t.Error(err)
-	}
-	msg2_2, err := client2.RunUntilMessage(ctx)
-	if err != nil {
-		t.Error(err)
-	}
-
-	if err := client1.checkMessageJoined(msg1_1, hello1.Hello); err != nil {
-		// Ordering is "joined" from client 2, then from client 1
-		if err := client1.checkMessageJoined(msg1_1, hello2.Hello); err != nil {
-			t.Error(err)
-		}
-		if err := client1.checkMessageJoined(msg1_2, hello1.Hello); err != nil {
-			t.Error(err)
-		}
-	} else {
-		// Ordering is "joined" from client 1, then from client 2
-		if err := client1.checkMessageJoined(msg1_2, hello2.Hello); err != nil {
-			t.Error(err)
-		}
-	}
-	if err := client2.checkMessageJoined(msg2_1, hello1.Hello); err != nil {
-		// Ordering is "joined" from client 2, then from client 1
-		if err := client2.checkMessageJoined(msg2_1, hello2.Hello); err != nil {
-			t.Error(err)
-		}
-		if err := client2.checkMessageJoined(msg2_2, hello1.Hello); err != nil {
-			t.Error(err)
-		}
-	} else {
-		// Ordering is "joined" from client 1, then from client 2
-		if err := client2.checkMessageJoined(msg2_2, hello2.Hello); err != nil {
-			t.Error(err)
-		}
-	}
+	WaitForUsersJoined(ctx, t, client1, hello1, client2, hello2)
 
 	var wg sync.WaitGroup
 
@@ -1024,11 +1068,13 @@ func TestBackendServer_ParticipantsUpdateTimeout(t *testing.T) {
 
 		data, err := json.Marshal(msg)
 		if err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			return
 		}
 		res, err := performBackendRequest(server.URL+"/api/v1/room/"+roomId, data)
 		if err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			return
 		}
 		defer res.Body.Close()
 		body, err := ioutil.ReadAll(res.Body)
@@ -1075,11 +1121,13 @@ func TestBackendServer_ParticipantsUpdateTimeout(t *testing.T) {
 
 		data, err := json.Marshal(msg)
 		if err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			return
 		}
 		res, err := performBackendRequest(server.URL+"/api/v1/room/"+roomId, data)
 		if err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			return
 		}
 		defer res.Body.Close()
 		body, err := ioutil.ReadAll(res.Body)
@@ -1092,6 +1140,9 @@ func TestBackendServer_ParticipantsUpdateTimeout(t *testing.T) {
 	}()
 
 	wg.Wait()
+	if t.Failed() {
+		return
+	}
 
 	msg1_a, err := client1.RunUntilMessage(ctx)
 	if err != nil {
@@ -1132,8 +1183,7 @@ func TestBackendServer_ParticipantsUpdateTimeout(t *testing.T) {
 	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second+100*time.Millisecond)
 	defer cancel2()
 
-	msg1_c, err := client1.RunUntilMessage(ctx2)
-	if msg1_c != nil {
+	if msg1_c, _ := client1.RunUntilMessage(ctx2); msg1_c != nil {
 		if in_call_2, err := checkMessageParticipantsInCall(msg1_c); err != nil {
 			t.Error(err)
 		} else if len(in_call_2.Users) != 2 {
@@ -1143,8 +1193,7 @@ func TestBackendServer_ParticipantsUpdateTimeout(t *testing.T) {
 
 	ctx3, cancel3 := context.WithTimeout(context.Background(), time.Second+100*time.Millisecond)
 	defer cancel3()
-	msg2_c, err := client2.RunUntilMessage(ctx3)
-	if msg2_c != nil {
+	if msg2_c, _ := client2.RunUntilMessage(ctx3); msg2_c != nil {
 		if in_call_2, err := checkMessageParticipantsInCall(msg2_c); err != nil {
 			t.Error(err)
 		} else if len(in_call_2.Users) != 2 {

@@ -22,7 +22,6 @@
 package signaling
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net/url"
@@ -59,6 +58,7 @@ type ClientSession struct {
 	supportsPermissions bool
 	permissions         map[Permission]bool
 
+	backend          *Backend
 	backendUrl       string
 	parsedBackendUrl *url.URL
 
@@ -83,7 +83,7 @@ type ClientSession struct {
 	pendingClientMessages []*NatsMessage
 }
 
-func NewClientSession(hub *Hub, privateId string, publicId string, data *SessionIdData, hello *HelloClientMessage, auth *BackendClientAuthResponse) (*ClientSession, error) {
+func NewClientSession(hub *Hub, privateId string, publicId string, data *SessionIdData, backend *Backend, hello *HelloClientMessage, auth *BackendClientAuthResponse) (*ClientSession, error) {
 	s := &ClientSession{
 		hub:       hub,
 		privateId: privateId,
@@ -95,6 +95,7 @@ func NewClientSession(hub *Hub, privateId string, publicId string, data *Session
 		userId:     auth.UserId,
 		userData:   auth.User,
 
+		backend:          backend,
 		backendUrl:       hello.Auth.Url,
 		parsedBackendUrl: hello.Auth.parsedUrl,
 
@@ -195,6 +196,10 @@ func (s *ClientSession) SetPermissions(permissions []Permission) {
 	s.permissions = p
 	s.supportsPermissions = true
 	log.Printf("Permissions of session %s changed: %s", s.PublicId(), permissions)
+}
+
+func (s *ClientSession) Backend() *Backend {
+	return s.backend
 }
 
 func (s *ClientSession) BackendUrl() string {
@@ -301,11 +306,12 @@ func (s *ClientSession) closeAndWait(wait bool) {
 	}
 }
 
-func GetSubjectForUserId(userId string) string {
-	// The NATS client doesn't work if a subject contains spaces. As the user id
-	// can have an arbitrary format, we need to make sure the subject is valid.
-	// See "https://github.com/nats-io/nats.js/issues/158" for a similar report.
-	return "user." + base64.StdEncoding.EncodeToString([]byte(userId))
+func GetSubjectForUserId(userId string, backend *Backend) string {
+	if backend == nil || backend.IsCompat() {
+		return GetEncodedSubject("user", userId)
+	} else {
+		return GetEncodedSubject("user", userId+"|"+backend.Id())
+	}
 }
 
 func (s *ClientSession) SubscribeNats(n NatsClient) error {
@@ -314,7 +320,7 @@ func (s *ClientSession) SubscribeNats(n NatsClient) error {
 
 	var err error
 	if s.userId != "" {
-		if s.userSubscription, err = n.Subscribe(GetSubjectForUserId(s.userId), s.natsReceiver); err != nil {
+		if s.userSubscription, err = n.Subscribe(GetSubjectForUserId(s.userId, s.backend), s.natsReceiver); err != nil {
 			return err
 		}
 	}
@@ -331,7 +337,7 @@ func (s *ClientSession) SubscribeRoomNats(n NatsClient, roomid string, roomSessi
 	defer s.mu.Unlock()
 
 	var err error
-	if s.roomSubscription, err = n.Subscribe("room."+roomid, s.natsReceiver); err != nil {
+	if s.roomSubscription, err = n.Subscribe(GetSubjectForRoomId(roomid, s.Backend()), s.natsReceiver); err != nil {
 		return err
 	}
 
@@ -655,7 +661,57 @@ func (s *ClientSession) processClientMessage(msg *nats.Msg) {
 		return
 	}
 
-	client.natsReceiver <- &message
+	s.processNatsMessage(client, &message)
+}
+
+func (s *ClientSession) processNatsMessage(client *Client, msg *NatsMessage) bool {
+	switch msg.Type {
+	case "message":
+		if msg.Message == nil {
+			log.Printf("Received NATS message without payload: %+v\n", msg)
+			return true
+		}
+
+		switch msg.Message.Type {
+		case "message":
+			if msg.Message.Message != nil &&
+				msg.Message.Message.Sender != nil &&
+				msg.Message.Message.Sender.SessionId == s.PublicId() {
+				// Don't send message back to sender (can happen if sent to user or room)
+				return true
+			}
+		case "control":
+			if msg.Message.Control != nil &&
+				msg.Message.Control.Sender != nil &&
+				msg.Message.Control.Sender.SessionId == s.PublicId() {
+				// Don't send message back to sender (can happen if sent to user or room)
+				return true
+			}
+		case "event":
+			if msg.Message.Event.Target == "participants" &&
+				msg.Message.Event.Type == "update" {
+				m := msg.Message.Event.Update
+				users := make(map[string]bool)
+				for _, entry := range m.Users {
+					users[entry["sessionId"].(string)] = true
+				}
+				for _, entry := range m.Changed {
+					if users[entry["sessionId"].(string)] {
+						continue
+					}
+					m.Users = append(m.Users, entry)
+				}
+				// TODO(jojo): Only send all users if current session id has
+				// changed its "inCall" flag to true.
+				m.Changed = nil
+			}
+		}
+
+		return client.writeMessage(msg.Message)
+	default:
+		log.Printf("Received NATS message with unsupported type %s: %+v\n", msg.Type, msg)
+		return true
+	}
 }
 
 func (s *ClientSession) combinePendingMessages(messages []*NatsMessage) ([]*NatsMessage, error) {
@@ -697,7 +753,7 @@ func (s *ClientSession) NotifySessionResumed(client *Client) {
 	log.Printf("Send %d pending messages to session %s", len(messages), s.PublicId())
 	had_participants_update := false
 	for _, message := range messages {
-		if !client.ProcessNatsMessage(message) {
+		if !s.processNatsMessage(client, message) {
 			break
 		}
 

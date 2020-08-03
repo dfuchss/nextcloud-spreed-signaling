@@ -196,6 +196,20 @@ const (
 type ClientTypeInternalAuthParams struct {
 	Random string `json:"random"`
 	Token  string `json:"token"`
+
+	Backend       string `json:"backend"`
+	parsedBackend *url.URL
+}
+
+func (p *ClientTypeInternalAuthParams) CheckValid() error {
+	if p.Backend == "" {
+		return fmt.Errorf("backend missing")
+	} else if u, err := url.Parse(p.Backend); err != nil {
+		return err
+	} else {
+		p.parsedBackend = u
+	}
+	return nil
 }
 
 type HelloClientMessageAuth struct {
@@ -246,6 +260,8 @@ func (m *HelloClientMessage) CheckValid() error {
 			}
 		case HelloClientTypeInternal:
 			if err := json.Unmarshal(*m.Auth.Params, &m.Auth.internalParams); err != nil {
+				return err
+			} else if err := m.Auth.internalParams.CheckValid(); err != nil {
 				return err
 			}
 		default:
@@ -399,6 +415,17 @@ type RoomEventServerMessage struct {
 	Users   []map[string]interface{} `json:"users,omitempty"`
 }
 
+const (
+	DisinviteReasonDisinvited = "disinvited"
+	DisinviteReasonDeleted    = "deleted"
+)
+
+type RoomDisinviteEventServerMessage struct {
+	RoomEventServerMessage
+
+	Reason string `json:"reason"`
+}
+
 type RoomEventMessage struct {
 	RoomId string           `json:"roomid"`
 	Data   *json.RawMessage `json:"data,omitempty"`
@@ -414,9 +441,9 @@ type EventServerMessage struct {
 	Change []*EventServerMessageSessionEntry `json:"change,omitempty"`
 
 	// Used for target "roomlist" / "participants"
-	Invite    *RoomEventServerMessage `json:"invite,omitempty"`
-	Disinvite *RoomEventServerMessage `json:"disinvite,omitempty"`
-	Update    *RoomEventServerMessage `json:"update,omitempty"`
+	Invite    *RoomEventServerMessage          `json:"invite,omitempty"`
+	Disinvite *RoomDisinviteEventServerMessage `json:"disinvite,omitempty"`
+	Update    *RoomEventServerMessage          `json:"update,omitempty"`
 
 	// Used for target "message"
 	Message *RoomEventMessage `json:"message,omitempty"`
