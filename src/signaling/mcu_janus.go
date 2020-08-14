@@ -28,6 +28,7 @@ import (
 	"reflect"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dlintw/goconf"
@@ -64,8 +65,6 @@ var (
 		videoPublisherUserId:  streamTypeVideo,
 		screenPublisherUserId: streamTypeScreen,
 	}
-
-	ErrNotConnected = fmt.Errorf("Not connected")
 )
 
 func getPluginValue(data janus.PluginData, pluginName string, key string) interface{} {
@@ -161,7 +160,12 @@ type mcuJanus struct {
 	reconnectInterval time.Duration
 
 	connectedSince time.Time
+	onConnected    atomic.Value
+	onDisconnected atomic.Value
 }
+
+func emptyOnConnected()    {}
+func emptyOnDisconnected() {}
 
 func NewMcuJanus(url string, config *goconf.ConfigFile, nats NatsClient) (Mcu, error) {
 	maxStreamBitrate, _ := config.GetInt("mcu", "maxstreambitrate")
@@ -190,6 +194,9 @@ func NewMcuJanus(url string, config *goconf.ConfigFile, nats NatsClient) (Mcu, e
 
 		reconnectInterval: initialReconnectInterval,
 	}
+	mcu.onConnected.Store(emptyOnConnected)
+	mcu.onDisconnected.Store(emptyOnDisconnected)
+
 	mcu.reconnectTimer = time.AfterFunc(mcu.reconnectInterval, mcu.doReconnect)
 	mcu.reconnectTimer.Stop()
 	if err := mcu.reconnect(); err != nil {
@@ -269,6 +276,7 @@ func (m *mcuJanus) scheduleReconnect(err error) {
 
 func (m *mcuJanus) ConnectionInterrupted() {
 	m.scheduleReconnect(nil)
+	m.notifyOnDisconnected()
 }
 
 func (m *mcuJanus) Start() error {
@@ -314,6 +322,8 @@ func (m *mcuJanus) Start() error {
 	log.Println("Created Janus handle", m.handle.Id)
 
 	go m.run()
+
+	m.notifyOnConnected()
 	return nil
 }
 
@@ -347,6 +357,32 @@ loop:
 func (m *mcuJanus) Stop() {
 	m.disconnect()
 	m.reconnectTimer.Stop()
+}
+
+func (m *mcuJanus) SetOnConnected(f func()) {
+	if f == nil {
+		f = emptyOnConnected
+	}
+
+	m.onConnected.Store(f)
+}
+
+func (m *mcuJanus) notifyOnConnected() {
+	f := m.onConnected.Load().(func())
+	f()
+}
+
+func (m *mcuJanus) SetOnDisconnected(f func()) {
+	if f == nil {
+		f = emptyOnDisconnected
+	}
+
+	m.onDisconnected.Store(f)
+}
+
+func (m *mcuJanus) notifyOnDisconnected() {
+	f := m.onDisconnected.Load().(func())
+	f()
 }
 
 type mcuJanusConnectionStats struct {
@@ -599,7 +635,7 @@ func (m *mcuJanus) getOrCreatePublisherHandle(ctx context.Context, id string, st
 	return handle, response.Session, roomId, nil
 }
 
-func (m *mcuJanus) NewPublisher(ctx context.Context, listener McuListener, id string, streamType string) (McuPublisher, error) {
+func (m *mcuJanus) NewPublisher(ctx context.Context, listener McuListener, id string, streamType string, initiator McuInitiator) (McuPublisher, error) {
 	if _, found := streamTypeUserIds[streamType]; !found {
 		return nil, fmt.Errorf("Unsupported stream type %s", streamType)
 	}
@@ -678,9 +714,9 @@ func (p *mcuJanusPublisher) handleConnected(event *janus.WebRTCUpMsg) {
 
 func (p *mcuJanusPublisher) handleSlowLink(event *janus.SlowLinkMsg) {
 	if event.Uplink {
-		log.Printf("Publisher %s (%d) is reporting %d NACKs on the uplink (Janus -> client)", p.listener.PublicId(), p.handleId, event.Nacks)
+		log.Printf("Publisher %s (%d) is reporting %d lost packets on the uplink (Janus -> client)", p.listener.PublicId(), p.handleId, event.Lost)
 	} else {
-		log.Printf("Publisher %s (%d) is reporting %d NACKs on the downlink (client -> Janus)", p.listener.PublicId(), p.handleId, event.Nacks)
+		log.Printf("Publisher %s (%d) is reporting %d lost packets on the downlink (client -> Janus)", p.listener.PublicId(), p.handleId, event.Lost)
 	}
 }
 
@@ -966,9 +1002,9 @@ func (p *mcuJanusSubscriber) handleConnected(event *janus.WebRTCUpMsg) {
 
 func (p *mcuJanusSubscriber) handleSlowLink(event *janus.SlowLinkMsg) {
 	if event.Uplink {
-		log.Printf("Subscriber %s (%d) is reporting %d NACKs on the uplink (Janus -> client)", p.listener.PublicId(), p.handleId, event.Nacks)
+		log.Printf("Subscriber %s (%d) is reporting %d lost packets on the uplink (Janus -> client)", p.listener.PublicId(), p.handleId, event.Lost)
 	} else {
-		log.Printf("Subscriber %s (%d) is reporting %d NACKs on the downlink (client -> Janus)", p.listener.PublicId(), p.handleId, event.Nacks)
+		log.Printf("Subscriber %s (%d) is reporting %d lost packets on the downlink (client -> Janus)", p.listener.PublicId(), p.handleId, event.Lost)
 	}
 }
 
@@ -1042,6 +1078,10 @@ retry:
 			var roomId uint64
 			handle, roomId, err = p.mcu.getOrCreateSubscriberHandle(ctx, p.publisher, p.streamType)
 			if err != nil {
+				// Reconnection didn't work, need to unregister/remove subscriber
+				// so a new object will be created if the request is retried.
+				p.mcu.unregisterClient(p)
+				p.listener.SubscriberClosed(p)
 				callback(fmt.Errorf("Already connected as subscriber for %s, error during re-joining: %s", p.streamType, err), nil)
 				return
 			}
