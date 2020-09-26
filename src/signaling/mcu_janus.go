@@ -22,6 +22,7 @@
 package signaling
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -34,8 +35,6 @@ import (
 	"github.com/dlintw/goconf"
 	"github.com/nats-io/go-nats"
 	"github.com/notedit/janus-go"
-
-	"golang.org/x/net/context"
 )
 
 const (
@@ -357,6 +356,9 @@ loop:
 func (m *mcuJanus) Stop() {
 	m.disconnect()
 	m.reconnectTimer.Stop()
+}
+
+func (m *mcuJanus) Reload(config *goconf.ConfigFile) {
 }
 
 func (m *mcuJanus) SetOnConnected(f func()) {

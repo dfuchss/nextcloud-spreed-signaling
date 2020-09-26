@@ -27,11 +27,9 @@ information on the API of the signaling server.
 
 The following tools are required for building the signaling server.
 
-- curl
 - git
-- go >= 1.6
+- go >= 1.10
 - make
-- python3
 
 All other dependencies are fetched automatically while building.
 

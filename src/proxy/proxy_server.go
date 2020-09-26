@@ -22,10 +22,10 @@
 package main
 
 import (
-	"crypto/rsa"
+	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -33,7 +33,6 @@ import (
 	"os"
 	"os/signal"
 	runtimepprof "runtime/pprof"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,8 +43,6 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/gorilla/securecookie"
 	"github.com/gorilla/websocket"
-
-	"golang.org/x/net/context"
 
 	"gopkg.in/dgrijalva/jwt-go.v3"
 
@@ -98,7 +95,7 @@ type ProxyServer struct {
 
 	upgrader websocket.Upgrader
 
-	tokenKeys       atomic.Value
+	tokens          ProxyTokens
 	statsAllowedIps map[string]bool
 
 	sid          uint64
@@ -112,52 +109,34 @@ type ProxyServer struct {
 }
 
 func NewProxyServer(r *mux.Router, version string, config *goconf.ConfigFile, nats signaling.NatsClient) (*ProxyServer, error) {
-	hashKey, _ := config.GetString("sessions", "hashkey")
-	switch len(hashKey) {
-	case 32:
-	case 64:
+	hashKey := make([]byte, 64)
+	if _, err := rand.Read(hashKey); err != nil {
+		return nil, fmt.Errorf("Could not generate random hash key: %s", err)
+	}
+
+	blockKey := make([]byte, 32)
+	if _, err := rand.Read(blockKey); err != nil {
+		return nil, fmt.Errorf("Could not generate random block key: %s", err)
+	}
+
+	var tokens ProxyTokens
+	var err error
+	tokenType, _ := config.GetString("app", "tokentype")
+	if tokenType == "" {
+		tokenType = TokenTypeDefault
+	}
+
+	switch tokenType {
+	case TokenTypeEtcd:
+		tokens, err = NewProxyTokensEtcd(config)
+	case TokenTypeStatic:
+		tokens, err = NewProxyTokensStatic(config)
 	default:
-		log.Printf("WARNING: The sessions hash key should be 32 or 64 bytes but is %d bytes", len(hashKey))
+		return nil, fmt.Errorf("Unsupported token type configured: %s", tokenType)
 	}
-
-	blockKey, _ := config.GetString("sessions", "blockkey")
-	blockBytes := []byte(blockKey)
-	switch len(blockKey) {
-	case 0:
-		blockBytes = nil
-	case 16:
-	case 24:
-	case 32:
-	default:
-		return nil, fmt.Errorf("The sessions block key must be 16, 24 or 32 bytes but is %d bytes", len(blockKey))
+	if err != nil {
+		return nil, err
 	}
-
-	tokenKeys := make(map[string]*rsa.PublicKey)
-	options, _ := config.GetOptions("tokens")
-	for _, id := range options {
-		filename, _ := config.GetString("tokens", id)
-		if filename == "" {
-			return nil, fmt.Errorf("No filename given for token %s", id)
-		}
-
-		keyData, err := ioutil.ReadFile(filename)
-		if err != nil {
-			return nil, fmt.Errorf("Could not read public key from %s: %s", filename, err)
-		}
-		key, err := jwt.ParseRSAPublicKeyFromPEM(keyData)
-		if err != nil {
-			return nil, fmt.Errorf("Could not parse public key from %s: %s", filename, err)
-		}
-
-		tokenKeys[id] = key
-	}
-
-	var keyIds []string
-	for k, _ := range tokenKeys {
-		keyIds = append(keyIds, k)
-	}
-	sort.Strings(keyIds)
-	log.Printf("Enabled token keys: %v", keyIds)
 
 	statsAllowed, _ := config.GetString("stats", "allowed_ips")
 	var statsAllowedIps map[string]bool
@@ -200,16 +179,16 @@ func NewProxyServer(r *mux.Router, version string, config *goconf.ConfigFile, na
 			WriteBufferSize: websocketWriteBufferSize,
 		},
 
+		tokens:          tokens,
 		statsAllowedIps: statsAllowedIps,
 
-		cookie:   securecookie.New([]byte(hashKey), blockBytes).MaxAge(0),
+		cookie:   securecookie.New(hashKey, blockKey).MaxAge(0),
 		sessions: make(map[uint64]*ProxySession),
 
 		clients:   make(map[string]signaling.McuClient),
 		clientIds: make(map[string]string),
 	}
 
-	result.setTokenKeys(tokenKeys)
 	result.upgrader.CheckOrigin = result.checkOrigin
 
 	if debug, _ := config.GetBool("app", "debug"); debug {
@@ -233,14 +212,6 @@ func NewProxyServer(r *mux.Router, version string, config *goconf.ConfigFile, na
 func (s *ProxyServer) checkOrigin(r *http.Request) bool {
 	// We allow any Origin to connect to the service.
 	return true
-}
-
-func (s *ProxyServer) setTokenKeys(keys map[string]*rsa.PublicKey) {
-	s.tokenKeys.Store(keys)
-}
-
-func (s *ProxyServer) getTokenKeys() map[string]*rsa.PublicKey {
-	return s.tokenKeys.Load().(map[string]*rsa.PublicKey)
 }
 
 func (s *ProxyServer) Start(config *goconf.ConfigFile) error {
@@ -384,6 +355,7 @@ func (s *ProxyServer) Stop() {
 	}
 
 	s.mcu.Stop()
+	s.tokens.Close()
 }
 
 func (s *ProxyServer) ShutdownChannel() chan bool {
@@ -413,40 +385,7 @@ func (s *ProxyServer) ScheduleShutdown() {
 }
 
 func (s *ProxyServer) Reload(config *goconf.ConfigFile) {
-	tokenKeys := make(map[string]*rsa.PublicKey)
-	options, _ := config.GetOptions("tokens")
-	for _, id := range options {
-		filename, _ := config.GetString("tokens", id)
-		if filename == "" {
-			log.Printf("No filename given for token %s, ignoring", id)
-			continue
-		}
-
-		keyData, err := ioutil.ReadFile(filename)
-		if err != nil {
-			log.Printf("Could not read public key from %s, ignoring: %s", filename, err)
-			continue
-		}
-		key, err := jwt.ParseRSAPublicKeyFromPEM(keyData)
-		if err != nil {
-			log.Printf("Could not parse public key from %s, ignoring: %s", filename, err)
-			continue
-		}
-
-		tokenKeys[id] = key
-	}
-
-	if len(tokenKeys) == 0 {
-		log.Printf("No token keys loaded")
-	} else {
-		var keyIds []string
-		for k, _ := range tokenKeys {
-			keyIds = append(keyIds, k)
-		}
-		sort.Strings(keyIds)
-		log.Printf("Enabled token keys: %v", keyIds)
-	}
-	s.setTokenKeys(tokenKeys)
+	s.tokens.Reload(config)
 }
 
 func (s *ProxyServer) setCommonHeaders(f func(http.ResponseWriter, *http.Request)) func(http.ResponseWriter, *http.Request) {
@@ -488,7 +427,12 @@ func (s *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client.OnClosed = s.clientClosed
+	client.OnClosed = func(c *signaling.Client) {
+		if session := client.GetSession(); session != nil {
+			session.MarkUsed()
+		}
+		s.clientClosed(c)
+	}
 	client.OnMessageReceived = func(c *signaling.Client, data []byte) {
 		s.processMessage(client, data)
 	}
@@ -600,12 +544,13 @@ func (s *ProxyServer) processMessage(client *ProxyClient, data []byte) {
 				session = s.GetSession(data.Sid)
 			}
 
-			if session == nil {
+			if session == nil || resumeId != session.PublicId() {
 				client.SendMessage(message.NewErrorServerMessage(signaling.NoSuchSession))
 				return
 			}
 
 			log.Printf("Resumed session %s", session.PublicId())
+			session.MarkUsed()
 			if atomic.LoadUint32(&s.shutdownScheduled) != 0 {
 				s.sendShutdownScheduled(session)
 			} else {
@@ -694,7 +639,7 @@ func (s *ProxyServer) processCommand(ctx context.Context, client *ProxyClient, s
 			return
 		}
 
-		log.Printf("Created %s publisher %s as %s", cmd.StreamType, publisher.Id(), id)
+		log.Printf("Created %s publisher %s as %s for %s", cmd.StreamType, publisher.Id(), id, session.PublicId())
 		session.StorePublisher(ctx, id, publisher)
 		s.StoreClient(id, publisher)
 
@@ -720,7 +665,7 @@ func (s *ProxyServer) processCommand(ctx context.Context, client *ProxyClient, s
 			return
 		}
 
-		log.Printf("Created %s subscriber %s as %s", cmd.StreamType, subscriber.Id(), id)
+		log.Printf("Created %s subscriber %s as %s for %s", cmd.StreamType, subscriber.Id(), id, session.PublicId())
 		session.StoreSubscriber(ctx, id, subscriber)
 		s.StoreClient(id, subscriber)
 
@@ -878,13 +823,17 @@ func (s *ProxyServer) NewSession(hello *signaling.HelloProxyClientMessage) (*Pro
 			return nil, fmt.Errorf("Unsupported claims type")
 		}
 
-		tokenKeys := s.getTokenKeys()
-		publicKey := tokenKeys[claims.Issuer]
-		if publicKey == nil {
+		tokenKey, err := s.tokens.Get(claims.Issuer)
+		if err != nil {
+			log.Printf("Could not get token for %s: %s", claims.Issuer, err)
+			return nil, err
+		}
+
+		if tokenKey == nil || tokenKey.key == nil {
 			log.Printf("Issuer %s is not supported", claims.Issuer)
 			return nil, fmt.Errorf("No key found for issuer")
 		}
-		return publicKey, nil
+		return tokenKey.key, nil
 	})
 	if err != nil {
 		return nil, TokenAuthFailed

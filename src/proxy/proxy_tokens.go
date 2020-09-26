@@ -1,6 +1,6 @@
 /**
  * Standalone signaling server for the Nextcloud Spreed app.
- * Copyright (C) 2019 struktur AG
+ * Copyright (C) 2020 struktur AG
  *
  * @author Joachim Bauch <bauch@struktur.de>
  *
@@ -19,46 +19,29 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-package signaling
+package main
 
 import (
-	"context"
-	"fmt"
+	"crypto/rsa"
 
 	"github.com/dlintw/goconf"
 )
 
-type TestMCU struct {
+const (
+	TokenTypeEtcd   = "etcd"
+	TokenTypeStatic = "static"
+
+	TokenTypeDefault = TokenTypeStatic
+)
+
+type ProxyToken struct {
+	id  string
+	key *rsa.PublicKey
 }
 
-func NewTestMCU() (Mcu, error) {
-	return &TestMCU{}, nil
-}
+type ProxyTokens interface {
+	Get(id string) (*ProxyToken, error)
 
-func (m *TestMCU) Start() error {
-	return nil
-}
-
-func (m *TestMCU) Stop() {
-}
-
-func (m *TestMCU) Reload(config *goconf.ConfigFile) {
-}
-
-func (m *TestMCU) SetOnConnected(f func()) {
-}
-
-func (m *TestMCU) SetOnDisconnected(f func()) {
-}
-
-func (m *TestMCU) GetStats() interface{} {
-	return nil
-}
-
-func (m *TestMCU) NewPublisher(ctx context.Context, listener McuListener, id string, streamType string, initiator McuInitiator) (McuPublisher, error) {
-	return nil, fmt.Errorf("Not implemented")
-}
-
-func (m *TestMCU) NewSubscriber(ctx context.Context, listener McuListener, publisher string, streamType string) (McuSubscriber, error) {
-	return nil, fmt.Errorf("Not implemented")
+	Reload(config *goconf.ConfigFile)
+	Close()
 }

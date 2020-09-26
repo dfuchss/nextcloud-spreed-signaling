@@ -23,6 +23,7 @@ package signaling
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -35,7 +36,6 @@ import (
 	"sync"
 
 	"github.com/dlintw/goconf"
-	"golang.org/x/net/context"
 	"golang.org/x/net/context/ctxhttp"
 )
 
@@ -47,11 +47,11 @@ type BackendClient struct {
 	transport *http.Transport
 	version   string
 	backends  *BackendConfiguration
+	clients   map[string]*HttpClientPool
 
 	mu sync.Mutex
 
 	maxConcurrentRequestsPerHost int
-	clients                      map[string]*HttpClientPool
 }
 
 func NewBackendClient(config *goconf.ConfigFile, maxConcurrentRequestsPerHost int, version string) (*BackendClient, error) {
@@ -77,9 +77,9 @@ func NewBackendClient(config *goconf.ConfigFile, maxConcurrentRequestsPerHost in
 		transport: transport,
 		version:   version,
 		backends:  backends,
+		clients:   make(map[string]*HttpClientPool),
 
 		maxConcurrentRequestsPerHost: maxConcurrentRequestsPerHost,
-		clients: make(map[string]*HttpClientPool),
 	}, nil
 }
 
