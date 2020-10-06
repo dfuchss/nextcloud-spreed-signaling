@@ -233,10 +233,14 @@ func (b *BackendConfiguration) GetBackend(u *url.URL) *Backend {
 		s += "/"
 	}
 	for _, entry := range entries {
+
+		// Remove protocol from url.
+		url := strings.TrimPrefix(strings.TrimPrefix(entry.url, "https://"), "http://")
+
 		if entry.url == "" {
 			// Old-style configuration, only hosts are configured.
 			return entry
-		} else if strings.HasPrefix(s, entry.url) {
+		} else if strings.HasPrefix(s, "https://" +  url) || strings.HasPrefix(s, "http://" + url) {
 			return entry
 		}
 	}
